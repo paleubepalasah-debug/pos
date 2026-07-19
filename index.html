@@ -1,0 +1,1939 @@
+```react
+import React, { useState, useEffect, useMemo } from 'react';
+import { 
+  Plus, Search, History, BarChart2, Settings, Trash2, Edit2, X, PlusCircle, 
+  MinusCircle, Check, ArrowLeft, RefreshCw, Download, Upload, Info, ShoppingBag, 
+  CheckCircle, ChevronRight, TrendingUp, DollarSign, Coffee, AlertTriangle
+} from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc } from 'firebase/firestore';
+
+// ==========================================
+// DATA DEFAULT AWAL UNTUK KEMUDAHAN TESTING
+// ==========================================
+const DEFAULT_PRODUCTS = [
+  {
+    id: "prod-1",
+    name: "Matcha Latte Signature",
+    category: "Matcha Series",
+    price: 15000,
+    hpp: 6000,
+    margin: 60,
+    active: true,
+    recipe: "1. Larutkan 5gr Pure Matcha Powder dengan 30ml air hangat.\n2. Tambahkan 15ml Simple Syrup.\n3. Masukkan es batu penuh ke dalam cup 16oz.\n4. Tuangkan 120ml Fresh Milk.\n5. Tuangkan larutan matcha perlahan di bagian atas (layering)."
+  },
+  {
+    id: "prod-2",
+    name: "Es Kopi Susu Aren",
+    category: "Coffee Series",
+    price: 13000,
+    hpp: 5000,
+    margin: 61.5,
+    active: true,
+    recipe: "1. Siapkan 1 shot Espresso (30ml).\n2. Masukkan 20ml Gula Aren cair ke dalam cup 16oz.\n3. Tambahkan es batu secukupnya.\n4. Tuangkan 100ml susu UHT.\n5. Tuangkan espresso secara perlahan di lapisan paling atas."
+  },
+  {
+    id: "prod-3",
+    name: "Matcha Strawberry Float",
+    category: "Matcha Series",
+    price: 18000,
+    hpp: 8000,
+    margin: 55.5,
+    active: true,
+    recipe: "1. Masukkan 2 sendok selai strawberry di dasar cup.\n2. Beri es batu secukupnya.\n3. Campurkan 120ml susu cair dan 10ml sirup vanilla, tuang ke cup.\n4. Larutkan 4gr matcha dengan 30ml air, tuang perlahan.\n5. Tambahkan 1 scoop Ice Cream Vanilla di atasnya."
+  },
+  {
+    id: "prod-4",
+    name: "Ice Jasmine Green Tea",
+    category: "Tea Series",
+    price: 10000,
+    hpp: 3000,
+    margin: 70,
+    active: true,
+    recipe: "1. Seduh kantong Jasmine Tea dengan 150ml air panas selama 3 menit.\n2. Tambahkan 25ml Fructose / Gula Cair.\n3. Shake bersama es batu hingga dingin.\n4. Sajikan dalam cup 16oz dengan topping selasih (opsional)."
+  }
+];
+
+const DEFAULT_SETTINGS = {
+  shopName: "MATCHAKEUN",
+  logoText: "Matcha & Coffee Space",
+  address: "Jl. Hijau Rindang No. 12, Bandung",
+  phone: "628123456789",
+  footerReceipt: "Terima kasih atas kunjungan Anda!\nKritik & Saran silakan WhatsApp ke nomor kami."
+};
+
+export default function App() {
+  // ==========================================
+  // STATE UTAMA (In-Memory & LocalStorage)
+  // ==========================================
+  const [products, setProducts] = useState(() => {
+    const saved = localStorage.getItem('matchakeun_products');
+    return saved ? JSON.parse(saved) : DEFAULT_PRODUCTS;
+  });
+
+  const [sales, setSales] = useState(() => {
+    const saved = localStorage.getItem('matchakeun_sales');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  const [settings, setSettings] = useState(() => {
+    const saved = localStorage.getItem('matchakeun_settings');
+    return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
+  });
+
+  // State Keranjang Belanja
+  const [cart, setCart] = useState([]);
+
+  // State Navigasi Halaman ('pos', 'history', 'report', 'settings')
+  const [activeTab, setActiveTab] = useState('pos');
+
+  // State Pencarian Produk
+  const [searchQuery, setSearchQuery] = useState('');
+
+  // State Form Produk (Tambah & Edit)
+  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [productForm, setProductForm] = useState({
+    name: '',
+    category: 'Matcha Series',
+    price: '',
+    hpp: '',
+    margin: 0,
+    active: true,
+    recipe: ''
+  });
+
+  // State Modal Resep (Setelah Jual)
+  const [recipeModal, setRecipeModal] = useState({
+    isOpen: false,
+    transactionId: '',
+    items: [] // { name, qty, recipe }
+  });
+
+  // State Notifikasi Banner
+  const [notification, setNotification] = useState(null);
+
+  // State Modal Konfirmasi Hapus Produk
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
+  // State Detail Transaksi Lama (dari Riwayat)
+  const [selectedHistoryTx, setSelectedHistoryTx] = useState(null);
+
+  // State Pencarian & Filter Riwayat
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyDateFilter, setHistoryDateFilter] = useState('');
+
+  // State Filter Laporan ('today', 'week', 'month', 'custom')
+  const [reportFilter, setReportFilter] = useState('today');
+  const [customStartDate, setCustomStartDate] = useState('');
+  const [customEndDate, setCustomEndDate] = useState('');
+
+  // ==========================================
+  // STATE FIREBASE CLOUD SYNC
+  // ==========================================
+  const [firebaseEnabled, setFirebaseEnabled] = useState(false);
+  const [user, setUser] = useState(null);
+  const [firebaseLoading, setFirebaseLoading] = useState(false);
+  const [cloudSyncStatus, setCloudSyncStatus] = useState('idle'); // 'idle', 'syncing', 'success', 'error'
+
+  // Global ID & Configuration
+  const appId = typeof window.__app_id !== 'undefined' ? window.__app_id : 'matchakeun-pos-app';
+  
+  // ==========================================
+  // PERSISTENCE LOCAL STORAGE
+  // ==========================================
+  useEffect(() => {
+    localStorage.setItem('matchakeun_products', JSON.stringify(products));
+  }, [products]);
+
+  useEffect(() => {
+    localStorage.setItem('matchakeun_sales', JSON.stringify(sales));
+  }, [sales]);
+
+  useEffect(() => {
+    localStorage.setItem('matchakeun_settings', JSON.stringify(settings));
+  }, [settings]);
+
+  // ==========================================
+  // NOTIFICATION UTILITY
+  // ==========================================
+  const showNotification = (message, type = 'success') => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification(null);
+    }, 4000);
+  };
+
+  // ==========================================
+  // FIREBASE INITIALIZATION & SYNC
+  // ==========================================
+  useEffect(() => {
+    // Check if Firebase config is available globally
+    if (typeof window.__firebase_config !== 'undefined' && window.__firebase_config) {
+      try {
+        setFirebaseLoading(true);
+        const firebaseConfig = JSON.parse(window.__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        const initAuth = async () => {
+          if (typeof window.__initial_auth_token !== 'undefined' && window.__initial_auth_token) {
+            await signInWithCustomToken(auth, window.__initial_auth_token);
+          } else {
+            await signInAnonymously(auth);
+          }
+        };
+
+        initAuth().catch(err => {
+          console.error("Firebase auth failed, running locally", err);
+        });
+
+        const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+          setUser(firebaseUser);
+          setFirebaseEnabled(true);
+          setFirebaseLoading(false);
+          if (firebaseUser) {
+            showNotification(`Tersambung ke Cloud Sync (${firebaseUser.uid.substring(0, 8)}...)`, 'info');
+            // Ambil data awal dari cloud jika ada
+            syncFromCloud(db, firebaseUser.uid);
+          }
+        });
+
+        return () => unsubscribe();
+      } catch (e) {
+        console.error("Error setting up Firebase", e);
+        setFirebaseLoading(false);
+      }
+    }
+  }, []);
+
+  // Fungsi Tarik Data dari Cloud
+  const syncFromCloud = async (db, userId) => {
+    if (!userId) return;
+    try {
+      setCloudSyncStatus('syncing');
+      // Ambil Produk
+      const productsDocRef = doc(db, 'artifacts', appId, 'users', userId, 'products', 'main');
+      const productsSnap = await getDoc(productsDocRef);
+      if (productsSnap.exists()) {
+        const cloudProducts = productsSnap.data().list || [];
+        if (cloudProducts.length > 0) {
+          setProducts(cloudProducts);
+        }
+      }
+
+      // Ambil Penjualan
+      const salesDocRef = doc(db, 'artifacts', appId, 'users', userId, 'sales', 'main');
+      const salesSnap = await getDoc(salesDocRef);
+      if (salesSnap.exists()) {
+        const cloudSales = salesSnap.data().list || [];
+        if (cloudSales.length > 0) {
+          setSales(cloudSales);
+        }
+      }
+
+      // Ambil Pengaturan
+      const settingsDocRef = doc(db, 'artifacts', appId, 'users', userId, 'settings', 'main');
+      const settingsSnap = await getDoc(settingsDocRef);
+      if (settingsSnap.exists()) {
+        setSettings(settingsSnap.data());
+      }
+
+      setCloudSyncStatus('success');
+    } catch (error) {
+      console.error("Cloud pull error", error);
+      setCloudSyncStatus('error');
+    }
+  };
+
+  // Fungsi Kirim Data ke Cloud
+  const pushToCloud = async () => {
+    if (!firebaseEnabled || !user) {
+      showNotification("Cloud sync tidak aktif. Hubungkan Firebase terlebih dahulu.", "info");
+      return;
+    }
+    
+    try {
+      setCloudSyncStatus('syncing');
+      const firebaseConfig = JSON.parse(window.__firebase_config);
+      const app = initializeApp(firebaseConfig);
+      const db = getFirestore(app);
+      const userId = user.uid;
+
+      // Unggah Produk
+      await setDoc(doc(db, 'artifacts', appId, 'users', userId, 'products', 'main'), {
+        list: products,
+        updatedAt: new Date().toISOString()
+      });
+
+      // Unggah Penjualan
+      await setDoc(doc(db, 'artifacts', appId, 'users', userId, 'sales', 'main'), {
+        list: sales,
+        updatedAt: new Date().toISOString()
+      });
+
+      // Unggah Pengaturan
+      await setDoc(doc(db, 'artifacts', appId, 'users', userId, 'settings', 'main'), settings);
+
+      setCloudSyncStatus('success');
+      showNotification("Database berhasil disinkronkan ke Cloud!", "success");
+    } catch (e) {
+      console.error("Cloud sync push error", e);
+      setCloudSyncStatus('error');
+      showNotification("Gagal sinkronisasi data ke Cloud.", "error");
+    }
+  };
+
+  // ==========================================
+  // FORMAT CURRENCY RUPIAH
+  // ==========================================
+  const formatRupiah = (number) => {
+    return new Intl.NumberFormat('id-ID', {
+      style: 'currency',
+      currency: 'IDR',
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 0
+    }).format(number);
+  };
+
+  // ==========================================
+  // LOGIKA KERANJANG BELANJA
+  // ==========================================
+  const handleAddToBag = (product) => {
+    if (!product.active) {
+      showNotification("Menu ini sedang tidak aktif / habis.", "info");
+      return;
+    }
+
+    setCart(prevCart => {
+      const existing = prevCart.find(item => item.id === product.id);
+      if (existing) {
+        return prevCart.map(item => 
+          item.id === product.id ? { ...item, qty: item.qty + 1 } : item
+        );
+      } else {
+        return [...prevCart, {
+          id: product.id,
+          name: product.name,
+          price: product.price,
+          hpp: product.hpp,
+          qty: 1,
+          recipe: product.recipe || "Resep belum ditambahkan."
+        }];
+      }
+    });
+  };
+
+  const handleDecreaseQty = (productId) => {
+    setCart(prevCart => {
+      const existing = prevCart.find(item => item.id === productId);
+      if (!existing) return prevCart;
+      if (existing.qty === 1) {
+        return prevCart.filter(item => item.id !== productId);
+      } else {
+        return prevCart.map(item => 
+          item.id === productId ? { ...item, qty: item.qty - 1 } : item
+        );
+      }
+    });
+  };
+
+  const handleIncreaseQty = (productId) => {
+    setCart(prevCart => 
+      prevCart.map(item => 
+        item.id === productId ? { ...item, qty: item.qty + 1 } : item
+      )
+    );
+  };
+
+  const handleRemoveFromCart = (productId) => {
+    setCart(prevCart => prevCart.filter(item => item.id !== productId));
+  };
+
+  const handleClearCart = () => {
+    setCart([]);
+  };
+
+  // Hitung total belanjaan saat ini
+  const cartTotals = useMemo(() => {
+    const subtotal = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+    const totalQty = cart.reduce((sum, item) => sum + item.qty, 0);
+    const totalHpp = cart.reduce((sum, item) => sum + (item.hpp * item.qty), 0);
+    return { subtotal, totalQty, totalHpp };
+  }, [cart]);
+
+  // ==========================================
+  // PROSES PENJUALAN / JUAL
+  // ==========================================
+  const handleCheckout = () => {
+    if (cart.length === 0) {
+      showNotification("Keranjang belanja masih kosong!", "error");
+      return;
+    }
+
+    const now = new Date();
+    const dateStr = now.getFullYear().toString() + 
+                    (now.getMonth() + 1).toString().padStart(2, '0') + 
+                    now.getDate().toString().padStart(2, '0');
+    
+    // Hitung nomor transaksi urut harian
+    const transactionsToday = sales.filter(s => {
+      const sDate = new Date(s.timestamp);
+      return sDate.toDateString() === now.toDateString();
+    });
+    
+    const nextSeq = (transactionsToday.length + 1).toString().padStart(4, '0');
+    const transactionId = `TRX-${dateStr}-${nextSeq}`;
+
+    const newSale = {
+      id: transactionId,
+      timestamp: now.toISOString(),
+      items: cart.map(item => ({
+        id: item.id,
+        name: item.name,
+        price: item.price,
+        hpp: item.hpp,
+        qty: item.qty,
+        recipe: item.recipe
+      })),
+      totalPrice: cartTotals.subtotal,
+      totalHpp: cartTotals.totalHpp,
+      totalQty: cartTotals.totalQty,
+      profit: cartTotals.subtotal - cartTotals.totalHpp
+    };
+
+    // Update sales database locally
+    const updatedSales = [newSale, ...sales];
+    setSales(updatedSales);
+
+    // Buka Modal Resep untuk baristas
+    setRecipeModal({
+      isOpen: true,
+      transactionId: transactionId,
+      items: cart.map(item => ({
+        name: item.name,
+        qty: item.qty,
+        recipe: item.recipe
+      }))
+    });
+
+    // Kosongkan keranjang & beri notifikasi sukses
+    setCart([]);
+    showNotification(`Transaksi ${transactionId} Berhasil Disimpan!`, "success");
+
+    // Jika cloud aktif, lakukan upload otomatis secara background
+    if (firebaseEnabled && user) {
+      setTimeout(() => {
+        pushToCloud();
+      }, 500);
+    }
+  };
+
+  // ==========================================
+  // MANAJEMEN MENU / CRUD LOGIC
+  // ==========================================
+  const calculateMargin = (price, hpp) => {
+    const p = parseFloat(price) || 0;
+    const h = parseFloat(hpp) || 0;
+    if (p === 0) return 0;
+    const marginPercent = ((p - h) / p) * 100;
+    return parseFloat(marginPercent.toFixed(1));
+  };
+
+  const handleOpenAddProduct = () => {
+    setEditingProduct(null);
+    setProductForm({
+      name: '',
+      category: 'Matcha Series',
+      price: '',
+      hpp: '',
+      margin: 0,
+      active: true,
+      recipe: ''
+    });
+    setIsProductModalOpen(true);
+  };
+
+  const handleOpenEditProduct = (product) => {
+    setEditingProduct(product);
+    setProductForm({
+      name: product.name,
+      category: product.category,
+      price: product.price,
+      hpp: product.hpp,
+      margin: product.margin,
+      active: product.active,
+      recipe: product.recipe
+    });
+    setIsProductModalOpen(true);
+  };
+
+  const handleFormChange = (field, val) => {
+    setProductForm(prev => {
+      const updated = { ...prev, [field]: val };
+      if (field === 'price' || field === 'hpp') {
+        updated.margin = calculateMargin(
+          field === 'price' ? val : prev.price,
+          field === 'hpp' ? val : prev.hpp
+        );
+      }
+      return updated;
+    });
+  };
+
+  const handleSaveProduct = (e) => {
+    e.preventDefault();
+    if (!productForm.name || !productForm.price) {
+      showNotification("Nama Menu & Harga Jual wajib diisi!", "error");
+      return;
+    }
+
+    const priceNum = parseFloat(productForm.price) || 0;
+    const hppNum = parseFloat(productForm.hpp) || 0;
+    const marginVal = calculateMargin(priceNum, hppNum);
+
+    if (editingProduct) {
+      // Edit mode
+      setProducts(prev => prev.map(p => 
+        p.id === editingProduct.id 
+          ? { 
+              ...p, 
+              name: productForm.name,
+              category: productForm.category,
+              price: priceNum,
+              hpp: hppNum,
+              margin: marginVal,
+              active: productForm.active,
+              recipe: productForm.recipe
+            }
+          : p
+      ));
+      showNotification(`Menu "${productForm.name}" berhasil diperbarui!`, "success");
+    } else {
+      // Add mode
+      const newProduct = {
+        id: 'prod-' + Date.now(),
+        name: productForm.name,
+        category: productForm.category,
+        price: priceNum,
+        hpp: hppNum,
+        margin: marginVal,
+        active: productForm.active,
+        recipe: productForm.recipe
+      };
+      setProducts(prev => [newProduct, ...prev]);
+      showNotification(`Menu "${productForm.name}" berhasil ditambahkan!`, "success");
+    }
+
+    setIsProductModalOpen(false);
+    
+    if (firebaseEnabled && user) {
+      setTimeout(() => pushToCloud(), 500);
+    }
+  };
+
+  const handleDeleteProduct = (productId) => {
+    const target = products.find(p => p.id === productId);
+    setProducts(prev => prev.filter(p => p.id !== productId));
+    showNotification(`Menu "${target ? target.name : ''}" telah dihapus!`, "info");
+    setDeleteConfirmId(null);
+
+    if (firebaseEnabled && user) {
+      setTimeout(() => pushToCloud(), 500);
+    }
+  };
+
+  // ==========================================
+  // PENCARIAN & FILTER PRODUK DI KASIR
+  // ==========================================
+  const filteredProducts = useMemo(() => {
+    return products.filter(p => {
+      const matchesSearch = p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                            p.category.toLowerCase().includes(searchQuery.toLowerCase());
+      return matchesSearch;
+    });
+  }, [products, searchQuery]);
+
+  // Ekstrak Kategori Unik
+  const categories = useMemo(() => {
+    const cats = products.map(p => p.category);
+    return ['Semua', ...new Set(cats)];
+  }, [products]);
+
+  const [selectedCategory, setSelectedCategory] = useState('Semua');
+
+  const displayedProducts = useMemo(() => {
+    if (selectedCategory === 'Semua') return filteredProducts;
+    return filteredProducts.filter(p => p.category === selectedCategory);
+  }, [filteredProducts, selectedCategory]);
+
+  // ==========================================
+  // FILTER RIWAYAT TRANSAKSI
+  // ==========================================
+  const filteredHistory = useMemo(() => {
+    return sales.filter(sale => {
+      // Pencarian berdasarkan nomor transaksi atau nama item
+      const queryLower = historySearch.toLowerCase();
+      const matchesQuery = sale.id.toLowerCase().includes(queryLower) || 
+                           sale.items.some(item => item.name.toLowerCase().includes(queryLower));
+
+      // Filter tanggal
+      let matchesDate = true;
+      if (historyDateFilter) {
+        const saleDateString = new Date(sale.timestamp).toISOString().split('T')[0];
+        matchesDate = saleDateString === historyDateFilter;
+      }
+
+      return matchesQuery && matchesDate;
+    });
+  }, [sales, historySearch, historyDateFilter]);
+
+  // ==========================================
+  // ANALISIS LAPORAN & STATISTIK (DENGAN RECHARTS MOCK/CUSTOM SVG GRAPH)
+  // ==========================================
+  const statistics = useMemo(() => {
+    const now = new Date();
+    
+    // Helper filter waktu
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay()); // Minggu ini (mulai hari Minggu)
+    startOfWeek.setHours(0,0,0,0);
+    
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    let filteredSalesForGraph = [...sales];
+
+    // Terapkan filter laporan aktif
+    if (reportFilter === 'today') {
+      filteredSalesForGraph = sales.filter(s => new Date(s.timestamp) >= startOfToday);
+    } else if (reportFilter === 'week') {
+      filteredSalesForGraph = sales.filter(s => new Date(s.timestamp) >= startOfWeek);
+    } else if (reportFilter === 'month') {
+      filteredSalesForGraph = sales.filter(s => new Date(s.timestamp) >= startOfMonth);
+    } else if (reportFilter === 'custom' && customStartDate && customEndDate) {
+      const sDate = new Date(customStartDate);
+      sDate.setHours(0,0,0,0);
+      const eDate = new Date(customEndDate);
+      eDate.setHours(23,59,59,999);
+      filteredSalesForGraph = sales.filter(s => {
+        const t = new Date(s.timestamp);
+        return t >= sDate && t <= eDate;
+      });
+    }
+
+    // Hitung total akumulasi
+    let omzetToday = 0;
+    let omzetWeek = 0;
+    let omzetMonth = 0;
+    let cupsSold = 0;
+    let totalTxCount = filteredSalesForGraph.length;
+    let profitToday = 0;
+    let profitMonth = 0;
+
+    sales.forEach(sale => {
+      const t = new Date(sale.timestamp);
+      const val = sale.totalPrice;
+      const profit = sale.profit;
+
+      if (t >= startOfToday) {
+        omzetToday += val;
+        profitToday += profit;
+      }
+      if (t >= startOfWeek) {
+        omzetWeek += val;
+      }
+      if (t >= startOfMonth) {
+        omzetMonth += val;
+        profitMonth += profit;
+      }
+    });
+
+    const totalRevenue = filteredSalesForGraph.reduce((sum, s) => sum + s.totalPrice, 0);
+    const totalProfit = filteredSalesForGraph.reduce((sum, s) => sum + s.profit, 0);
+    const totalCups = filteredSalesForGraph.reduce((sum, s) => sum + s.totalQty, 0);
+
+    // Kelompokkan data harian untuk Grafik Penjualan Harian (7 Hari Terakhir)
+    const dailyChartData = [];
+    for (let i = 6; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(now.getDate() - i);
+      const dStr = d.toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric' });
+      const dCompare = d.toDateString();
+
+      const totalDayRevenue = sales
+        .filter(s => new Date(s.timestamp).toDateString() === dCompare)
+        .reduce((sum, s) => sum + s.totalPrice, 0);
+
+      dailyChartData.push({ label: dStr, value: totalDayRevenue });
+    }
+
+    return {
+      omzetToday,
+      omzetWeek,
+      omzetMonth,
+      cupsSold: totalCups, // Dari filter aktif
+      totalTxCount,        // Dari filter aktif
+      profitToday,
+      profitMonth,
+      totalRevenue,       // Dari filter aktif
+      totalProfit,        // Dari filter aktif
+      dailyChartData
+    };
+  }, [sales, reportFilter, customStartDate, customEndDate]);
+
+  // ==========================================
+  // BACKUP & RESTORE DATABASE JSON
+  // ==========================================
+  const handleExportBackup = () => {
+    const backupData = {
+      products,
+      sales,
+      settings,
+      backupDate: new Date().toISOString(),
+      app: 'Matchakeun POS'
+    };
+
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
+    const downloadAnchor = document.createElement('a');
+    downloadAnchor.setAttribute("href", dataStr);
+    downloadAnchor.setAttribute("download", `MATCHAKEUN_POS_BACKUP_${new Date().toISOString().split('T')[0]}.json`);
+    document.body.appendChild(downloadAnchor);
+    downloadAnchor.click();
+    downloadAnchor.remove();
+    showNotification("Backup database berhasil diunduh!", "success");
+  };
+
+  const handleImportBackup = (event) => {
+    const fileReader = new FileReader();
+    const file = event.target.files[0];
+    if (!file) return;
+
+    fileReader.onload = (e) => {
+      try {
+        const parsed = JSON.parse(e.target.result);
+        if (parsed.app === 'Matchakeun POS' && parsed.products && parsed.sales) {
+          setProducts(parsed.products);
+          setSales(parsed.sales);
+          if (parsed.settings) setSettings(parsed.settings);
+          showNotification("Database Berhasil Direstore!", "success");
+          
+          if (firebaseEnabled && user) {
+            setTimeout(() => pushToCloud(), 500);
+          }
+        } else {
+          showNotification("Format file backup tidak cocok atau rusak.", "error");
+        }
+      } catch (err) {
+        showNotification("Gagal membaca file backup.", "error");
+      }
+    };
+    fileReader.readAsText(file);
+  };
+
+  return (
+    <div className="min-h-screen bg-neutral-100 flex flex-col font-sans text-neutral-800 antialiased selection:bg-emerald-200">
+      
+      {/* Banner Notifikasi Pop-up */}
+      {notification && (
+        <div className={`fixed top-4 right-4 z-50 flex items-center gap-3 px-5 py-4 rounded-xl shadow-2xl transition-all transform animate-bounce ${
+          notification.type === 'error' ? 'bg-red-600 text-white' : 
+          notification.type === 'info' ? 'bg-blue-600 text-white' : 
+          'bg-emerald-700 text-white'
+        }`}>
+          {notification.type === 'error' ? <AlertTriangle size={20} /> : <CheckCircle size={20} />}
+          <span className="font-semibold text-sm">{notification.message}</span>
+        </div>
+      )}
+
+      {/* ==========================================
+          HEADER UTAMA
+          ========================================== */}
+      <header className="sticky top-0 z-30 bg-[#5E8B4A] text-white shadow-md">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
+          
+          {/* Logo & Info Toko */}
+          <div className="flex items-center gap-3">
+            <div className="bg-white text-[#5E8B4A] p-2 rounded-xl shadow-inner font-black text-xl tracking-wider">
+              🍃
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight">{settings.shopName}</h1>
+              <p className="text-xs text-emerald-100 font-medium">{settings.logoText}</p>
+            </div>
+          </div>
+
+          {/* Navigasi Utama */}
+          <div className="flex flex-wrap items-center gap-2">
+            <button 
+              onClick={() => setActiveTab('pos')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'pos' 
+                  ? 'bg-white text-[#5E8B4A] shadow' 
+                  : 'text-white hover:bg-[#4E733D]'
+              }`}
+            >
+              <ShoppingBag size={18} />
+              Kasir
+            </button>
+            <button 
+              onClick={() => setActiveTab('history')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'history' 
+                  ? 'bg-white text-[#5E8B4A] shadow' 
+                  : 'text-white hover:bg-[#4E733D]'
+              }`}
+            >
+              <History size={18} />
+              Riwayat
+            </button>
+            <button 
+              onClick={() => setActiveTab('report')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'report' 
+                  ? 'bg-white text-[#5E8B4A] shadow' 
+                  : 'text-white hover:bg-[#4E733D]'
+              }`}
+            >
+              <BarChart2 size={18} />
+              Laporan
+            </button>
+            <button 
+              onClick={() => setActiveTab('settings')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
+                activeTab === 'settings' 
+                  ? 'bg-white text-[#5E8B4A] shadow' 
+                  : 'text-white hover:bg-[#4E733D]'
+              }`}
+            >
+              <Settings size={18} />
+              Pengaturan
+            </button>
+
+            {/* Indikator Firebase Cloud Sync */}
+            {firebaseEnabled && (
+              <button 
+                onClick={pushToCloud}
+                disabled={cloudSyncStatus === 'syncing'}
+                className="ml-2 bg-[#4c723c] hover:bg-[#3f5f32] text-xs font-bold py-2 px-3 rounded-lg flex items-center gap-1.5 transition-colors"
+                title="Sinkronisasi Manual"
+              >
+                <RefreshCw size={14} className={cloudSyncStatus === 'syncing' ? 'animate-spin' : ''} />
+                <span>Cloud</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* ==========================================
+          KONTEN UTAMA SESUAI AKTIF TAB
+          ========================================== */}
+      <main className="flex-grow max-w-7xl mx-auto w-full px-4 py-6">
+        
+        {/* TAB 1: KASIR (POS) */}
+        {activeTab === 'pos' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            {/* Bagian Kiri: Katalog Produk (Col 8) */}
+            <div className="lg:col-span-8 flex flex-col gap-5">
+              
+              {/* Toolbar Atas Kasir */}
+              <div className="bg-white p-4 rounded-2xl shadow-sm border border-neutral-200/60 flex flex-col sm:flex-row gap-3 items-center justify-between">
+                
+                {/* Cari Menu */}
+                <div className="relative w-full sm:w-72">
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-neutral-400 pointer-events-none">
+                    <Search size={18} />
+                  </span>
+                  <input 
+                    type="text"
+                    placeholder="Cari nama menu atau kategori..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 text-sm bg-neutral-50 border border-neutral-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#5E8B4A] focus:border-[#5E8B4A] transition-all"
+                  />
+                  {searchQuery && (
+                    <button 
+                      onClick={() => setSearchQuery('')}
+                      className="absolute inset-y-0 right-0 flex items-center pr-3 text-neutral-400 hover:text-neutral-600"
+                    >
+                      <X size={16} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filter Kategori Quick-Chips */}
+                <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto pb-1 sm:pb-0 scrollbar-none">
+                  {categories.map(cat => (
+                    <button
+                      key={cat}
+                      onClick={() => setSelectedCategory(cat)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition-colors ${
+                        selectedCategory === cat 
+                          ? 'bg-[#5E8B4A] text-white' 
+                          : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Tombol Tambah Menu Baru */}
+                <button 
+                  onClick={handleOpenAddProduct}
+                  className="w-full sm:w-auto flex items-center justify-center gap-2 bg-[#5E8B4A] hover:bg-[#4E733D] text-white px-4 py-2 rounded-xl text-sm font-semibold shadow-sm transition-colors"
+                >
+                  <Plus size={18} />
+                  <span>Menu Baru</span>
+                </button>
+              </div>
+
+              {/* Tampilan Empty State Jika Tidak Ada Menu */}
+              {products.length === 0 ? (
+                <div className="bg-white rounded-2xl border-2 border-dashed border-neutral-300 p-12 text-center flex flex-col items-center justify-center gap-4">
+                  <div className="bg-emerald-50 text-[#5E8B4A] p-5 rounded-full">
+                    <Coffee size={48} />
+                  </div>
+                  <div className="max-w-md">
+                    <h3 className="text-lg font-bold text-neutral-800">Belum Ada Menu Minuman</h3>
+                    <p className="text-sm text-neutral-500 mt-1">
+                      Silakan tambahkan menu minuman pertama Anda lengkap dengan harga dan resep rahasia untuk memulai jualan.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleOpenAddProduct}
+                    className="flex items-center gap-2 bg-[#5E8B4A] hover:bg-[#4E733D] text-white px-6 py-3 rounded-xl font-bold shadow-md transform hover:-translate-y-0.5 transition-all"
+                  >
+                    <PlusCircle size={20} />
+                    Tambah Menu Pertama
+                  </button>
+                </div>
+              ) : displayedProducts.length === 0 ? (
+                <div className="bg-white rounded-2xl p-12 text-center text-neutral-500 border border-neutral-200">
+                  <Search className="mx-auto text-neutral-300 mb-2" size={36} />
+                  <p className="font-semibold">Menu "{searchQuery}" tidak ditemukan</p>
+                  <p className="text-xs mt-1">Coba kata kunci lain atau pilih kategori yang berbeda.</p>
+                </div>
+              ) : (
+                /* Grid Katalog Produk */
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+                  {displayedProducts.map(product => (
+                    <div 
+                      key={product.id}
+                      onClick={() => handleAddToBag(product)}
+                      className={`group bg-white rounded-2xl border transition-all duration-200 overflow-hidden cursor-pointer flex flex-col justify-between hover:shadow-lg hover:border-emerald-200 active:scale-95 ${
+                        !product.active ? 'opacity-50 border-neutral-200 bg-neutral-50' : 'border-neutral-200 shadow-sm'
+                      }`}
+                    >
+                      {/* Kartu Atas */}
+                      <div className="p-4 flex flex-col gap-2">
+                        {/* Kategori Badge & Status */}
+                        <div className="flex items-center justify-between">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-neutral-400">
+                            {product.category}
+                          </span>
+                          {!product.active && (
+                            <span className="text-[9px] font-bold bg-neutral-200 text-neutral-600 px-2 py-0.5 rounded-full">
+                              Kosong
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Nama Produk */}
+                        <h3 className="font-bold text-neutral-800 group-hover:text-[#5E8B4A] transition-colors leading-tight min-h-[2.5rem] line-clamp-2">
+                          {product.name}
+                        </h3>
+                      </div>
+
+                      {/* Kartu Bawah: Harga & Aksi */}
+                      <div className="bg-neutral-50 px-4 py-3 border-t border-neutral-100 flex items-center justify-between">
+                        <span className="font-extrabold text-[#5E8B4A] text-sm">
+                          {formatRupiah(product.price)}
+                        </span>
+
+                        {/* Quick edit */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenEditProduct(product);
+                          }}
+                          className="p-1 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-200/50 rounded-lg transition-colors"
+                          title="Edit Menu"
+                        >
+                          <Edit2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Bagian Kanan: Keranjang Pesanan (Col 4) */}
+            <div className="lg:col-span-4">
+              <div className="bg-white rounded-2xl border border-neutral-200/60 shadow-lg p-5 flex flex-col h-[calc(100vh-140px)] sticky top-24">
+                
+                {/* Header Keranjang */}
+                <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[#5E8B4A] font-bold text-base">Keranjang Belanja</span>
+                    {cartTotals.totalQty > 0 && (
+                      <span className="bg-[#5E8B4A] text-white text-xs px-2.5 py-0.5 rounded-full font-extrabold">
+                        {cartTotals.totalQty}
+                      </span>
+                    )}
+                  </div>
+                  {cart.length > 0 && (
+                    <button 
+                      onClick={handleClearCart}
+                      className="text-xs text-red-500 hover:text-red-700 font-bold transition-colors"
+                    >
+                      Kosongkan
+                    </button>
+                  )}
+                </div>
+
+                {/* Daftar Item di Keranjang */}
+                <div className="flex-grow overflow-y-auto py-4 space-y-3 scrollbar-thin">
+                  {cart.length === 0 ? (
+                    <div className="h-full flex flex-col items-center justify-center text-center text-neutral-400 gap-3">
+                      <ShoppingBag size={40} className="stroke-[1.5] text-neutral-300" />
+                      <div>
+                        <p className="font-semibold text-sm text-neutral-500">Keranjang Masih Kosong</p>
+                        <p className="text-xs text-neutral-400 mt-1">Pilih menu di sebelah kiri untuk ditambahkan.</p>
+                      </div>
+                    </div>
+                  ) : (
+                    cart.map(item => (
+                      <div 
+                        key={item.id} 
+                        className="bg-neutral-50 p-3 rounded-xl border border-neutral-200/60 flex flex-col gap-2"
+                      >
+                        <div className="flex justify-between items-start gap-2">
+                          <span className="font-bold text-xs text-neutral-800 leading-tight">
+                            {item.name}
+                          </span>
+                          <button 
+                            onClick={() => handleRemoveFromCart(item.id)}
+                            className="text-neutral-400 hover:text-red-600 transition-colors"
+                          >
+                            <X size={14} />
+                          </button>
+                        </div>
+
+                        <div className="flex items-center justify-between mt-1">
+                          {/* Kontrol Qty */}
+                          <div className="flex items-center gap-1 bg-white border border-neutral-300 rounded-lg p-0.5">
+                            <button 
+                              onClick={() => handleDecreaseQty(item.id)}
+                              className="text-neutral-500 hover:text-red-600 p-1"
+                            >
+                              <MinusCircle size={15} />
+                            </button>
+                            <span className="font-extrabold text-xs px-2 text-neutral-800">
+                              {item.qty}
+                            </span>
+                            <button 
+                              onClick={() => handleIncreaseQty(item.id)}
+                              className="text-neutral-500 hover:text-emerald-700 p-1"
+                            >
+                              <PlusCircle size={15} />
+                            </button>
+                          </div>
+
+                          {/* Detail Harga */}
+                          <div className="text-right">
+                            <span className="text-[10px] text-neutral-400 block">
+                              {formatRupiah(item.price)}
+                            </span>
+                            <span className="font-bold text-xs text-[#5E8B4A]">
+                              {formatRupiah(item.price * item.qty)}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                {/* Footer Keranjang & Tombol Checkout */}
+                <div className="pt-4 border-t border-neutral-200 space-y-4">
+                  
+                  {/* Perhitungan Total */}
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs text-neutral-500">
+                      <span>Subtotal ({cartTotals.totalQty} Cup)</span>
+                      <span>{formatRupiah(cartTotals.subtotal)}</span>
+                    </div>
+                    <div className="flex justify-between text-base font-extrabold text-neutral-800 border-t border-dashed border-neutral-200 pt-2">
+                      <span>Total Bayar</span>
+                      <span className="text-[#5E8B4A]">{formatRupiah(cartTotals.subtotal)}</span>
+                    </div>
+                  </div>
+
+                  {/* Tombol Aksi */}
+                  <div className="grid grid-cols-1 gap-2">
+                    <button
+                      onClick={handleCheckout}
+                      disabled={cart.length === 0}
+                      className={`w-full py-3.5 rounded-xl font-bold text-sm tracking-wide shadow-md flex items-center justify-center gap-2 transform transition-all active:scale-95 ${
+                        cart.length > 0 
+                          ? 'bg-[#5E8B4A] hover:bg-[#4E733D] text-white hover:shadow-lg' 
+                          : 'bg-neutral-200 text-neutral-400 cursor-not-allowed'
+                      }`}
+                    >
+                      <Check size={18} />
+                      <span>PROSES PENJUALAN (JUAL)</span>
+                    </button>
+                  </div>
+                </div>
+
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 2: RIWAYAT PENJUALAN */}
+        {activeTab === 'history' && (
+          <div className="bg-white rounded-2xl shadow-sm border border-neutral-200/60 p-6">
+            
+            {/* Header Tab Riwayat */}
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-5 border-b border-neutral-100">
+              <div>
+                <h2 className="text-xl font-extrabold text-neutral-800">Riwayat Penjualan</h2>
+                <p className="text-xs text-neutral-500 mt-1">Daftar semua transaksi penjualan yang telah berhasil disimpan.</p>
+              </div>
+
+              {/* Filter & Pencarian Riwayat */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Cari */}
+                <div className="relative w-full sm:w-64">
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-neutral-400">
+                    <Search size={16} />
+                  </span>
+                  <input 
+                    type="text" 
+                    placeholder="No. Transaksi / Menu..."
+                    value={historySearch}
+                    onChange={(e) => setHistorySearch(e.target.value)}
+                    className="w-full pl-9 pr-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5E8B4A]"
+                  />
+                </div>
+
+                {/* Filter Tanggal */}
+                <input 
+                  type="date"
+                  value={historyDateFilter}
+                  onChange={(e) => setHistoryDateFilter(e.target.value)}
+                  className="px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-[#5E8B4A] text-neutral-700 font-medium"
+                />
+
+                {/* Reset Filter */}
+                {(historySearch || historyDateFilter) && (
+                  <button 
+                    onClick={() => { setHistorySearch(''); setHistoryDateFilter(''); }}
+                    className="text-xs text-[#5E8B4A] hover:underline font-bold"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Tabel Riwayat */}
+            {filteredHistory.length === 0 ? (
+              <div className="py-12 text-center text-neutral-400">
+                <History className="mx-auto text-neutral-300 mb-2 animate-pulse" size={40} />
+                <p className="font-semibold">Tidak ada data transaksi yang cocok</p>
+                <p className="text-xs mt-1">Coba sesuaikan kata kunci pencarian atau tanggal filter.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="border-b border-neutral-200 text-neutral-400 text-xs font-bold uppercase tracking-wider">
+                      <th className="py-3 px-4">No. Transaksi</th>
+                      <th className="py-3 px-4">Waktu</th>
+                      <th className="py-3 px-4">Menu & Detail</th>
+                      <th className="py-3 px-4 text-center">Cup</th>
+                      <th className="py-3 px-4 text-right">Total</th>
+                      <th className="py-3 px-4 text-center">Resep</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-neutral-100 text-sm">
+                    {filteredHistory.map((sale) => {
+                      const dateFormatted = new Date(sale.timestamp).toLocaleDateString('id-ID', {
+                        day: 'numeric', month: 'short', year: 'numeric'
+                      });
+                      const timeFormatted = new Date(sale.timestamp).toLocaleTimeString('id-ID', {
+                        hour: '2-digit', minute: '2-digit'
+                      });
+
+                      return (
+                        <tr key={sale.id} className="hover:bg-neutral-50/80 transition-colors">
+                          <td className="py-3.5 px-4 font-mono font-bold text-neutral-700">
+                            {sale.id}
+                          </td>
+                          <td className="py-3.5 px-4">
+                            <span className="block text-neutral-700 font-medium">{dateFormatted}</span>
+                            <span className="text-[11px] text-neutral-400">{timeFormatted} WIB</span>
+                          </td>
+                          <td className="py-3.5 px-4 max-w-xs">
+                            <div className="space-y-0.5">
+                              {sale.items.map((it, idx) => (
+                                <div key={idx} className="text-xs text-neutral-600 flex justify-between">
+                                  <span>{it.name}</span>
+                                  <span className="font-bold text-neutral-500">×{it.qty}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-center font-extrabold text-neutral-700">
+                            {sale.totalQty}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-extrabold text-emerald-700">
+                            {formatRupiah(sale.totalPrice)}
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            <button 
+                              onClick={() => setSelectedHistoryTx(sale)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-[#5E8B4A] rounded-lg text-xs font-bold transition-colors"
+                            >
+                              <Info size={13} />
+                              Lihat Resep
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: LAPORAN PENJUALAN */}
+        {activeTab === 'report' && (
+          <div className="space-y-6">
+            
+            {/* Toolbar Filter Laporan */}
+            <div className="bg-white p-5 rounded-2xl shadow-sm border border-neutral-200/60 flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-extrabold text-neutral-800">Analisis Penjualan</h2>
+                <p className="text-xs text-neutral-500 mt-1">Laporan omzet, laba kotor, dan volume penjualan minuman.</p>
+              </div>
+
+              {/* Filter Selector */}
+              <div className="flex flex-wrap items-center gap-2">
+                {['today', 'week', 'month', 'custom'].map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => setReportFilter(mode)}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold uppercase tracking-wider transition-colors ${
+                      reportFilter === mode 
+                        ? 'bg-[#5E8B4A] text-white' 
+                        : 'bg-neutral-100 text-neutral-600 hover:bg-neutral-200'
+                    }`}
+                  >
+                    {mode === 'today' ? 'Hari Ini' : mode === 'week' ? 'Minggu Ini' : mode === 'month' ? 'Bulan Ini' : 'Custom'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Form Input Custom Date */}
+            {reportFilter === 'custom' && (
+              <div className="bg-white p-4 rounded-xl border border-neutral-200 flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-neutral-500">Mulai:</label>
+                  <input 
+                    type="date"
+                    value={customStartDate}
+                    onChange={(e) => setCustomStartDate(e.target.value)}
+                    className="px-3 py-1.5 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A]"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-neutral-500">Sampai:</label>
+                  <input 
+                    type="date"
+                    value={customEndDate}
+                    onChange={(e) => setCustomEndDate(e.target.value)}
+                    className="px-3 py-1.5 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A]"
+                  />
+                </div>
+                <p className="text-[10px] text-neutral-400">Pilih rentang tanggal untuk memperbarui statistik di bawah.</p>
+              </div>
+            )}
+
+            {/* Grid Statistik Utama */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              
+              {/* Omzet Saat Ini */}
+              <div className="bg-white p-5 rounded-2xl border border-neutral-200/60 shadow-sm flex items-center justify-between">
+                <div className="space-y-1">
+                  <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Total Pendapatan (Omzet)</span>
+                  <h3 className="text-xl font-black text-[#5E8B4A]">{formatRupiah(statistics.totalRevenue)}</h3>
+                  <span className="text-[10px] text-neutral-400 block">Berdasarkan filter aktif</span>
+                </div>
+                <div className="bg-emerald-50 text-[#5E8B4A] p-3 rounded-xl">
+                  <DollarSign size={24} />
+                </div>
+              </div>
+
+              {/* Total Cup Terjual */}
+              <div className="bg-white p-5 rounded-2xl border border-neutral-200/60 shadow-sm flex items-center justify-between">
+                <div className="space-y-1">
+                  <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Total Cup Terjual</span>
+                  <h3 className="text-xl font-black text-neutral-800">{statistics.cupsSold} Cup</h3>
+                  <span className="text-[10px] text-neutral-400 block">Volume penjualan</span>
+                </div>
+                <div className="bg-neutral-100 text-neutral-600 p-3 rounded-xl">
+                  <Coffee size={24} />
+                </div>
+              </div>
+
+              {/* Total Keuntungan Bersih (Estimasi) */}
+              <div className="bg-white p-5 rounded-2xl border border-neutral-200/60 shadow-sm flex items-center justify-between">
+                <div className="space-y-1">
+                  <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Margin Keuntungan (Laba)</span>
+                  <h3 className="text-xl font-black text-[#5E8B4A]">{formatRupiah(statistics.totalProfit)}</h3>
+                  <span className="text-[10px] text-neutral-400 block">Omzet dikurangi HPP Menu</span>
+                </div>
+                <div className="bg-emerald-100/55 text-emerald-800 p-3 rounded-xl">
+                  <TrendingUp size={24} />
+                </div>
+              </div>
+
+              {/* Jumlah Transaksi Sukses */}
+              <div className="bg-white p-5 rounded-2xl border border-neutral-200/60 shadow-sm flex items-center justify-between">
+                <div className="space-y-1">
+                  <span className="text-xs font-bold text-neutral-400 uppercase tracking-wider">Transaksi Sukses</span>
+                  <h3 className="text-xl font-black text-neutral-800">{statistics.totalTxCount} Transaksi</h3>
+                  <span className="text-[10px] text-neutral-400 block">Rata-rata penjualan aktif</span>
+                </div>
+                <div className="bg-neutral-100 text-neutral-600 p-3 rounded-xl">
+                  <ShoppingBag size={24} />
+                </div>
+              </div>
+
+            </div>
+
+            {/* Grafik Penjualan Harian */}
+            <div className="bg-white p-6 rounded-2xl border border-neutral-200/60 shadow-sm">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h3 className="text-base font-bold text-neutral-800">Performa Jualan 7 Hari Terakhir</h3>
+                  <p className="text-xs text-neutral-400">Total pendapatan harian yang dikonversi dalam Rupiah.</p>
+                </div>
+              </div>
+
+              {/* Simple Responsive SVG Bar Chart */}
+              <div className="w-full">
+                <div className="flex items-end justify-between h-48 px-2 border-b border-neutral-200 pb-2 gap-4">
+                  {statistics.dailyChartData.map((data, index) => {
+                    // Cari nilai tertinggi untuk persentase tinggi bar grafik
+                    const maxVal = Math.max(...statistics.dailyChartData.map(d => d.value)) || 1;
+                    const heightPercent = Math.min(100, Math.max(5, (data.value / maxVal) * 100));
+
+                    return (
+                      <div key={index} className="flex-1 flex flex-col items-center gap-2 group cursor-pointer h-full justify-end">
+                        {/* Tooltip Nilai */}
+                        <div className="opacity-0 group-hover:opacity-100 bg-neutral-800 text-white text-[10px] py-1 px-2 rounded absolute mb-24 transition-opacity z-10 font-bold">
+                          {formatRupiah(data.value)}
+                        </div>
+
+                        {/* Bar */}
+                        <div 
+                          style={{ height: `${heightPercent}%` }}
+                          className="w-full sm:w-12 bg-emerald-50 hover:bg-[#5E8B4A]/80 transition-all rounded-t-lg border-t-2 border-[#5E8B4A] flex items-end justify-center pb-2 text-[10px] font-bold text-[#5E8B4A] group-hover:text-white"
+                        >
+                          <span className="hidden sm:inline">
+                            {data.value > 0 ? `${(data.value / 1000)}k` : ''}
+                          </span>
+                        </div>
+
+                        {/* Label Sumbu X */}
+                        <span className="text-[10px] text-neutral-500 font-medium text-center truncate w-full">
+                          {data.label}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Info Omzet Berdasarkan Periode Global */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4 flex flex-col justify-between">
+                <span className="text-xs font-semibold text-neutral-500">Akumulasi Omzet Hari Ini</span>
+                <span className="text-lg font-extrabold text-neutral-800 mt-1">{formatRupiah(statistics.omzetToday)}</span>
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4 flex flex-col justify-between">
+                <span className="text-xs font-semibold text-neutral-500">Akumulasi Omzet Minggu Ini</span>
+                <span className="text-lg font-extrabold text-neutral-800 mt-1">{formatRupiah(statistics.omzetWeek)}</span>
+              </div>
+              <div className="bg-neutral-50 border border-neutral-200 rounded-xl p-4 flex flex-col justify-between">
+                <span className="text-xs font-semibold text-neutral-500">Akumulasi Omzet Bulan Ini</span>
+                <span className="text-lg font-extrabold text-neutral-800 mt-1">{formatRupiah(statistics.omzetMonth)}</span>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* TAB 4: PENGATURAN & BACKUP */}
+        {activeTab === 'settings' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+            
+            {/* Kiri: Form Pengaturan Toko */}
+            <div className="lg:col-span-8 bg-white p-6 rounded-2xl shadow-sm border border-neutral-200/60 space-y-6">
+              <div>
+                <h2 className="text-xl font-extrabold text-neutral-800">Pengaturan Toko & Struk</h2>
+                <p className="text-xs text-neutral-500 mt-1">Sesuaikan informasi outlet yang dicetak pada sistem penjualan Anda.</p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Nama Toko */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Nama Toko / Outlet</label>
+                  <input 
+                    type="text" 
+                    value={settings.shopName}
+                    onChange={(e) => setSettings({ ...settings, shopName: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* Slogan Toko */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Slogan / Keterangan Logo</label>
+                  <input 
+                    type="text" 
+                    value={settings.logoText}
+                    onChange={(e) => setSettings({ ...settings, logoText: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* Alamat Toko */}
+                <div className="space-y-1.5 sm:col-span-2">
+                  <label className="text-xs font-bold text-neutral-500">Alamat Lengkap</label>
+                  <input 
+                    type="text" 
+                    value={settings.address}
+                    onChange={(e) => setSettings({ ...settings, address: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* No WhatsApp */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Nomor WhatsApp Hubungi Kami (cth: 62812...)</label>
+                  <input 
+                    type="text" 
+                    value={settings.phone}
+                    onChange={(e) => setSettings({ ...settings, phone: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* Footer Receipt */}
+                <div className="space-y-1.5 sm:col-span-2">
+                  <label className="text-xs font-bold text-neutral-500">Catatan Kaki Struk Penjualan</label>
+                  <textarea 
+                    rows={3}
+                    value={settings.footerReceipt}
+                    onChange={(e) => setSettings({ ...settings, footerReceipt: e.target.value })}
+                    className="w-full px-3.5 py-2.5 bg-neutral-50 border border-neutral-300 rounded-xl text-sm focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-4 border-t border-neutral-100">
+                <button
+                  onClick={() => {
+                    showNotification("Pengaturan toko berhasil diperbarui!", "success");
+                    if (firebaseEnabled && user) {
+                      setTimeout(() => pushToCloud(), 500);
+                    }
+                  }}
+                  className="px-6 py-2.5 bg-[#5E8B4A] hover:bg-[#4E733D] text-white rounded-xl text-sm font-bold shadow-md transition-all"
+                >
+                  Simpan Konfigurasi
+                </button>
+              </div>
+            </div>
+
+            {/* Kanan: Alat Backup & Integrasi Cloud (Col 4) */}
+            <div className="lg:col-span-4 space-y-6">
+              
+              {/* Box Backup / Restore */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-neutral-200/60 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-800">Manajemen Database Lokal</h3>
+                  <p className="text-[11px] text-neutral-500 mt-0.5">Amankan data transaksi & menu Anda dengan file ekspor manual.</p>
+                </div>
+
+                <div className="space-y-2">
+                  {/* Backup Button */}
+                  <button
+                    onClick={handleExportBackup}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 bg-neutral-100 hover:bg-neutral-200 text-neutral-700 font-bold text-xs rounded-xl transition-colors border border-neutral-300/80"
+                  >
+                    <Download size={14} />
+                    <span>Ekspor Backup (.JSON)</span>
+                  </button>
+
+                  {/* Restore Input File */}
+                  <div className="relative">
+                    <input 
+                      type="file" 
+                      accept=".json"
+                      onChange={handleImportBackup}
+                      id="restore-file"
+                      className="hidden"
+                    />
+                    <label
+                      htmlFor="restore-file"
+                      className="w-full flex items-center justify-center gap-2 py-2.5 bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold text-xs rounded-xl transition-colors border border-amber-200 cursor-pointer"
+                    >
+                      <Upload size={14} />
+                      <span>Impor / Restore Database</span>
+                    </label>
+                  </div>
+                </div>
+              </div>
+
+              {/* Box Firebase Cloud Sync */}
+              <div className="bg-white p-6 rounded-2xl shadow-sm border border-neutral-200/60 space-y-4">
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-800">Sinkronisasi Cloud</h3>
+                  <p className="text-[11px] text-neutral-500 mt-0.5">Simpan data Anda secara online di cloud agar sinkron dengan tablet/HP kasir lain.</p>
+                </div>
+
+                {firebaseEnabled ? (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5 text-[#5E8B4A] font-extrabold text-xs">
+                        <CheckCircle size={14} />
+                        <span>Cloud Terhubung</span>
+                      </div>
+                      <span className="text-[10px] text-neutral-500 font-mono break-all">ID: {user?.uid}</span>
+                    </div>
+
+                    <button
+                      onClick={pushToCloud}
+                      disabled={cloudSyncStatus === 'syncing'}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 bg-[#5E8B4A] hover:bg-[#4E733D] text-white font-bold text-xs rounded-xl transition-all shadow-sm"
+                    >
+                      <RefreshCw size={14} className={cloudSyncStatus === 'syncing' ? 'animate-spin' : ''} />
+                      <span>{cloudSyncStatus === 'syncing' ? 'Menyinkronkan...' : 'Sinkronkan Sekarang'}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-xl text-neutral-500 text-xs leading-relaxed">
+                      Sistem sinkronisasi online akan mendeteksi Firebase secara otomatis jika konfigurasi cloud telah diatur di server ini.
+                    </div>
+                    <button
+                      disabled
+                      className="w-full py-2.5 bg-neutral-200 text-neutral-400 font-bold text-xs rounded-xl cursor-not-allowed text-center"
+                    >
+                      Menunggu Koneksi Cloud...
+                    </button>
+                  </div>
+                )}
+              </div>
+
+            </div>
+
+          </div>
+        )}
+
+      </main>
+
+      {/* ==========================================
+          MODAL 1: TAMBAH & EDIT MENU
+          ========================================== */}
+      {isProductModalOpen && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/55 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-lg shadow-2xl overflow-hidden border border-neutral-100 transform scale-100 transition-all">
+            
+            {/* Header Modal */}
+            <div className="px-5 py-4 bg-[#5E8B4A] text-white flex items-center justify-between">
+              <h3 className="font-bold text-base">
+                {editingProduct ? 'Edit Menu Minuman' : 'Tambah Menu Minuman Baru'}
+              </h3>
+              <button 
+                onClick={() => setIsProductModalOpen(false)}
+                className="text-white hover:bg-[#4E733D] p-1 rounded-lg transition-colors"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Body Modal (Form) */}
+            <form onSubmit={handleSaveProduct} className="p-5 space-y-4">
+              
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Nama */}
+                <div className="space-y-1.5 sm:col-span-2">
+                  <label className="text-xs font-bold text-neutral-500">Nama Menu <span className="text-red-500">*</span></label>
+                  <input 
+                    type="text"
+                    required
+                    placeholder="Contoh: Ice Matcha Macchiato"
+                    value={productForm.name}
+                    onChange={(e) => handleFormChange('name', e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* Kategori */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Kategori</label>
+                  <select 
+                    value={productForm.category}
+                    onChange={(e) => handleFormChange('category', e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  >
+                    <option value="Matcha Series">Matcha Series</option>
+                    <option value="Coffee Series">Coffee Series</option>
+                    <option value="Tea Series">Tea Series</option>
+                    <option value="Dessert">Dessert</option>
+                    <option value="Topping">Topping</option>
+                  </select>
+                </div>
+
+                {/* Status Aktif */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500 block">Status Menu</label>
+                  <div className="flex items-center gap-4 py-1.5">
+                    <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold text-neutral-700">
+                      <input 
+                        type="radio" 
+                        name="active-status" 
+                        checked={productForm.active === true}
+                        onChange={() => handleFormChange('active', true)}
+                        className="text-[#5E8B4A] focus:ring-[#5E8B4A]"
+                      />
+                      <span>Tersedia (Aktif)</span>
+                    </label>
+                    <label className="inline-flex items-center gap-2 cursor-pointer text-xs font-semibold text-neutral-700">
+                      <input 
+                        type="radio" 
+                        name="active-status" 
+                        checked={productForm.active === false}
+                        onChange={() => handleFormChange('active', false)}
+                        className="text-[#5E8B4A] focus:ring-[#5E8B4A]"
+                      />
+                      <span>Kosong</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Harga Jual */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Harga Jual (Rp) <span className="text-red-500">*</span></label>
+                  <input 
+                    type="number"
+                    required
+                    placeholder="Harga ke pembeli"
+                    value={productForm.price}
+                    onChange={(e) => handleFormChange('price', e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none font-bold"
+                  />
+                </div>
+
+                {/* HPP */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-neutral-500">Harga Pokok Produksi / HPP (Rp)</label>
+                  <input 
+                    type="number"
+                    placeholder="Modal per cup"
+                    value={productForm.hpp}
+                    onChange={(e) => handleFormChange('hpp', e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none"
+                  />
+                </div>
+
+                {/* Info Margin Keuntungan */}
+                <div className="sm:col-span-2 p-3 bg-emerald-50 rounded-lg text-xs flex justify-between items-center text-neutral-600">
+                  <span>Estimasi Margin Keuntungan Bersih:</span>
+                  <span className="font-extrabold text-[#5E8B4A]">
+                    {productForm.margin}% (Rp {((parseFloat(productForm.price) || 0) - (parseFloat(productForm.hpp) || 0)).toLocaleString('id-ID')})
+                  </span>
+                </div>
+
+                {/* Area Input Bebas Resep */}
+                <div className="space-y-1.5 sm:col-span-2">
+                  <div className="flex justify-between items-center">
+                    <label className="text-xs font-bold text-neutral-500">Resep Pembuatan Rahasia (Bebas Ketik)</label>
+                    <span className="text-[10px] text-neutral-400">Akan tampil setelah transaksi sukses</span>
+                  </div>
+                  <textarea 
+                    rows={4}
+                    placeholder="Tuliskan takaran susu, bubuk matcha, gula, sirup, es batu, dan langkah pembuatan cup ini di sini..."
+                    value={productForm.recipe}
+                    onChange={(e) => handleFormChange('recipe', e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-neutral-50 border border-neutral-300 rounded-lg focus:ring-2 focus:ring-[#5E8B4A] focus:outline-none leading-relaxed"
+                  />
+                </div>
+              </div>
+
+              {/* Tombol Aksi Bawah */}
+              <div className="pt-4 border-t border-neutral-100 flex items-center justify-between">
+                {editingProduct ? (
+                  <button
+                    type="button"
+                    onClick={() => setDeleteConfirmId(editingProduct.id)}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-xl text-xs font-bold transition-all"
+                  >
+                    <Trash2 size={14} />
+                    <span>Hapus Menu</span>
+                  </button>
+                ) : <div />}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setIsProductModalOpen(false)}
+                    className="px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 rounded-xl text-xs font-bold transition-colors"
+                  >
+                    Batal
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-5 py-2.5 bg-[#5E8B4A] hover:bg-[#4E733D] text-white rounded-xl text-xs font-bold shadow-md transition-all"
+                  >
+                    Simpan Menu
+                  </button>
+                </div>
+              </div>
+
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================
+          MODAL 2: KONFIRMASI HAPUS MENU
+          ========================================== */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-sm p-6 shadow-2xl border border-neutral-200 text-center space-y-4">
+            <div className="bg-red-50 text-red-600 p-4 rounded-full w-fit mx-auto">
+              <AlertTriangle size={32} />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-neutral-800 text-base">Hapus Menu Ini?</h3>
+              <p className="text-xs text-neutral-500 mt-1">
+                Tindakan ini tidak dapat dibatalkan. Menu akan hilang secara permanen dari daftar kasir.
+              </p>
+            </div>
+            <div className="flex items-center justify-center gap-2.5 pt-2">
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="px-4 py-2 bg-neutral-100 hover:bg-neutral-200 text-neutral-600 rounded-xl text-xs font-bold transition-colors"
+              >
+                Kembali
+              </button>
+              <button
+                onClick={() => {
+                  handleDeleteProduct(deleteConfirmId);
+                  setIsProductModalOpen(false);
+                }}
+                className="px-5 py-2 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-bold shadow-sm transition-colors"
+              >
+                Ya, Hapus Permanen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================
+          MODAL 3: POPUP FULLSCREEN RESEP MINUMAN (PANDUAN BARISTA)
+          ========================================== */}
+      {recipeModal.isOpen && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl w-full max-w-3xl shadow-2xl overflow-hidden my-8 max-h-[90vh] flex flex-col">
+            
+            {/* Header Resep */}
+            <div className="bg-[#5E8B4A] text-white p-6 flex items-center justify-between">
+              <div>
+                <span className="text-xs font-bold uppercase tracking-widest bg-emerald-700 text-emerald-100 px-3 py-1 rounded-full">
+                  Resep Transaksi Sukses
+                </span>
+                <h3 className="text-xl font-black mt-1.5 flex items-center gap-2">
+                  <span>No. Transaksi:</span>
+                  <span className="font-mono">{recipeModal.transactionId}</span>
+                </h3>
+              </div>
+              <div className="bg-white/20 p-2.5 rounded-full animate-bounce">
+                <Coffee size={24} />
+              </div>
+            </div>
+
+            {/* Body Panduan Barista (Scrollable) */}
+            <div className="p-6 overflow-y-auto flex-grow space-y-6">
+              
+              <div className="p-4 bg-emerald-50 rounded-2xl border border-emerald-100 text-emerald-900 text-xs font-medium leading-relaxed">
+                📢 <strong>Hai Barista!</strong> Berikut adalah panduan racikan instan untuk pesanan baru yang baru saja diselesaikan. Silakan seduh sesuai takaran di bawah ini agar rasa tetap konsisten.
+              </div>
+
+              <div className="space-y-5">
+                {recipeModal.items.map((item, index) => (
+                  <div 
+                    key={index} 
+                    className="bg-neutral-50 rounded-2xl border border-neutral-200 p-5 space-y-3"
+                  >
+                    {/* Header Item & Total Cup */}
+                    <div className="flex items-center justify-between pb-3 border-b border-neutral-200">
+                      <h4 className="font-black text-neutral-800 text-sm flex items-center gap-2">
+                        <span>{item.name}</span>
+                        <span className="text-[#5E8B4A] text-xs font-bold bg-emerald-100 px-2.5 py-0.5 rounded-full">
+                          {item.qty} Cup
+                        </span>
+                      </h4>
+                      <span className="text-[10px] text-neutral-400 font-semibold uppercase tracking-wider">
+                        Panduan Sajian
+                      </span>
+                    </div>
+
+                    {/* Teks Resep Bebas */}
+                    <div className="text-xs text-neutral-700 leading-relaxed whitespace-pre-line bg-white p-4 rounded-xl border border-neutral-100 font-mono">
+                      {item.recipe || "Barista Note: Resep bebas belum dimasukkan untuk menu ini."}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+            </div>
+
+            {/* Footer Modal */}
+            <div className="p-6 border-t border-neutral-200 bg-neutral-50 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="text-xs text-neutral-400 font-semibold">
+                Selesai membuat pesanan? Klik tombol di kanan.
+              </div>
+              <button
+                onClick={() => setRecipeModal({ isOpen: false, transactionId: '', items: [] })}
+                className="w-full sm:w-auto px-8 py-3.5 bg-[#5E8B4A] hover:bg-[#4E733D] text-white rounded-xl text-sm font-bold shadow-lg transform hover:-translate-y-0.5 transition-all flex items-center justify-center gap-2"
+              >
+                <Check size={18} />
+                <span>✔ Minuman Selesai / Siap Saji</span>
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================
+          MODAL 4: DETAIL TRANSAKSI LAMA (DARI RIWAYAT)
+          ========================================== */}
+      {selectedHistoryTx && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl w-full max-w-xl shadow-2xl overflow-hidden max-h-[85vh] flex flex-col border border-neutral-200">
+            
+            {/* Header Detail */}
+            <div className="px-5 py-4 border-b border-neutral-200 flex items-center justify-between bg-neutral-50">
+              <div>
+                <h4 className="text-sm font-bold text-neutral-800">Detail & Resep Jualan Lama</h4>
+                <p className="text-[10px] text-neutral-400 mt-0.5">ID Transaksi: {selectedHistoryTx.id}</p>
+              </div>
+              <button 
+                onClick={() => setSelectedHistoryTx(null)}
+                className="p-1 text-neutral-400 hover:text-neutral-700 hover:bg-neutral-100 rounded-lg"
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            {/* Detail Body */}
+            <div className="p-5 overflow-y-auto flex-grow space-y-4">
+              
+              {/* Item Pembelian */}
+              <div className="space-y-2">
+                <span className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider block">Menu yang Dibeli</span>
+                {selectedHistoryTx.items.map((it, idx) => (
+                  <div key={idx} className="bg-neutral-50 p-3 rounded-lg border border-neutral-200 flex justify-between items-center text-xs text-neutral-700">
+                    <div>
+                      <span className="font-bold block">{it.name}</span>
+                      <span className="text-neutral-400 text-[10px] mt-0.5">{formatRupiah(it.price)} / cup</span>
+                    </div>
+                    <span className="font-bold text-neutral-500">× {it.qty}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Total Bayar */}
+              <div className="flex justify-between items-center bg-emerald-50 p-3 rounded-xl border border-emerald-200 text-xs">
+                <span className="font-semibold text-emerald-800">Total Akumulasi Pembayaran:</span>
+                <span className="font-extrabold text-[#5E8B4A] text-sm">
+                  {formatRupiah(selectedHistoryTx.totalPrice)}
+                </span>
+              </div>
+
+              {/* Resep Pembuatan */}
+              <div className="space-y-3">
+                <span className="text-[10px] text-neutral-400 font-bold uppercase tracking-wider block">Panduan Resep Terkait</span>
+                {selectedHistoryTx.items.map((it, idx) => (
+                  <div key={idx} className="border border-neutral-200 rounded-xl p-4 bg-white space-y-2">
+                    <span className="text-xs font-bold text-neutral-800 block border-b border-neutral-100 pb-1.5">
+                      {it.name} (Qty {it.qty})
+                    </span>
+                    <p className="text-xs text-neutral-600 font-mono whitespace-pre-wrap leading-relaxed">
+                      {it.recipe || "Resep rahasia belum dimasukkan."}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+            </div>
+
+            {/* Footer Detail */}
+            <div className="p-4 border-t border-neutral-200 bg-neutral-50 flex justify-end">
+              <button
+                onClick={() => setSelectedHistoryTx(null)}
+                className="px-5 py-2 bg-[#5E8B4A] hover:bg-[#4E733D] text-white text-xs font-bold rounded-xl transition-all"
+              >
+                Selesai / Tutup Detail
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* ==========================================
+          FOOTER COPYRIGHT
+          ========================================== */}
+      <footer className="bg-neutral-800 text-neutral-400 text-xs py-6 mt-12 border-t border-neutral-700">
+        <div className="max-w-7xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-3 text-center md:text-left">
+          <div>
+            <p className="font-bold text-neutral-200">© 2026 {settings.shopName} - All Rights Reserved.</p>
+            <p className="text-[10px] text-neutral-500 mt-0.5">Sistem Point of Sale Modern khusus kedai minuman premium.</p>
+          </div>
+          <div>
+            <p className="text-[10px] text-neutral-500">
+              Berjalan dengan React + Tailwind CSS + IndexedDB Local Storage.
+            </p>
+          </div>
+        </div>
+      </footer>
+
+    </div>
+  );
+}
+
+```
